@@ -1,12 +1,18 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'dart:ui' as ui;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:darumadrop/logger.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/animation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+
+import 'daruma_image.dart';
+import 'daruma_state.dart';
 
 void main() {
 
@@ -27,10 +33,12 @@ void main() {
 
 void _enableBLE() async{
   // check adapter availability
+  //if (await FlutterBluePlus.isSupported == false) {
   if (await FlutterBluePlus.isAvailable == false) {
     Logger.warn("Bluetooth not supported by this device");
     return;
   }
+
 
   // turn on bluetooth ourself if we can
   // for iOS, the user controls bluetooth enable/disable
@@ -76,6 +84,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
 
   BluetoothDevice? _device;
   bool _isConnect = false;
+  DarumaState _state = DarumaState.stay;
 
   BluetoothCharacteristic? _notifyChara;
   BluetoothCharacteristic? _readChara;
@@ -106,30 +115,58 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
   var _curGy = 0.0;
   var _curGz = 0.0;
 
-  final AudioPlayer _bgmPlayer = AudioPlayer();
-  final AudioPlayer _sePlayer = AudioPlayer();
+
+
+
+  final AudioPlayer _bgmPlayer = AudioPlayer(playerId: "BGM");
+  final AudioPlayer _sePlayer = AudioPlayer(playerId: "SE");
 
   final AssetSource _bgmAsset = AssetSource("audio/neodaruma.mp3");
-  // お、おちる！
-  final AssetSource _seAsset01 = AssetSource("audio/daruma_void01.mp3");
-  // うわぁ
-  final AssetSource _seAsset02 = AssetSource("audio/daruma_void02.mp3");
   // 喝！
   final AssetSource _seAsset03 = AssetSource("audio/daruma_void03.mp3");
   // おみごと
   final AssetSource _seAsset04 = AssetSource("audio/daruma_void04.mp3");
 
+  // 揺れたときの声
+  final List<AssetSource> _darumaPlaySe = [
+    // お、おちる！
+    AssetSource("audio/daruma_void01.mp3"),
+    // うわぁ
+    AssetSource("audio/daruma_void02.mp3"),
+//    // あけおめ
+//    AssetSource("audio/daruma_akeome.mp3"),
+  ];
+
+  final _random = Random();
+
   late Timer _timer;
+
+  DarumaState _darumaState = DarumaState.stay;
+
+  DarumaImage _darumaImage = DarumaImage.ready;
+
+  final Map<DarumaImage, Image> _imageMap = {
+    DarumaImage.ready:Image.asset("assets/image/daruma_off.png"),
+    DarumaImage.normal:Image.asset("assets/image/daruma_on.png"),
+    DarumaImage.hit:Image.asset("assets/image/daruma_hit.png"),
+  };
+
+
 
   @override
   void initState() {
     super.initState();
 
-    WidgetsBinding.instance!.addObserver(this);
+    WidgetsBinding.instance.addObserver(this);
 
     _bgmPlayer.setVolume(0.2);
     _bgmPlayer.setReleaseMode(ReleaseMode.loop);
     _bgmPlayer.play(_bgmAsset);
+
+    _sePlayer.onPlayerComplete.listen((event) {
+      Logger.info("効果音再生終了");
+      _state = DarumaState.stay;
+    });
 
     if(BackgroundPainter.isInitialized() == false)  {
       BackgroundPainter.initialize();
@@ -148,6 +185,32 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
       });
     },
     );
+
+    // ログレベルの設定
+    //FlutterBluePlus.setLogLevel(LogLevel.verbose, color:false);
+    FlutterBluePlus.setLogLevel(LogLevel.error, color:false);
+
+    // スキャン時のコールバック設定
+    var subscription = FlutterBluePlus.scanResults.listen((results) {
+      if(results.isEmpty){
+        Logger.debug('result is empty');
+      }
+      for (ScanResult r in results) {
+        var deviceName = r.device.localName;
+        //var deviceName = r.device.platformName;
+
+        //Logger.debug('$deviceName found! rssi: ${r.rssi}');
+        if("" != deviceName ){
+          Logger.debug('$deviceName found!');
+        }
+        if(_device == null && "daruma" == deviceName ){
+          Logger.debug('daruma is scan');
+          _device = r.device;
+        }
+      }
+    },onError: (e) {
+      Logger.error("error", exception: e);
+    });
   }
 
   @override
@@ -171,12 +234,99 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
         // 破棄されたとき
         _bgmPlayer.stop();
         break;
+      case ui.AppLifecycleState.hidden:
+        // TODO: Handle this case.
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final Size size = MediaQuery.of(context).size;
+
+    // 計測データをFlSpotに変換する
+    final List<LineChartBarData> accelData = [];
+
+    final List<FlSpot> accelX = [];
+    for (var i = 0; i < _accelX.length; i++) {
+      accelX.add(FlSpot(i.toDouble(), _accelX[i]));
+    }
+
+    final List<FlSpot> accelY = [];
+    for (var i = 0; i < _accelY.length; i++) {
+      accelY.add(FlSpot(i.toDouble(), _accelY[i]));
+    }
+
+    final List<FlSpot> accelZ = [];
+    for (var i = 0; i < _accelZ.length; i++) {
+      accelZ.add(FlSpot(i.toDouble(), _accelZ[i]));
+    }
+/*
+    // X軸の移動量がわかる
+    accelData.add(LineChartBarData(
+        spots: accelX,
+        color:Colors.blue
+    ));
+
+    // Z軸の移動量を計測できる(本来はY軸だが、NEOダルマオトシの場合はZ軸)
+    accelData.add(LineChartBarData(
+        spots: accelY,
+        color:Colors.red
+    ));
+
+    // Y軸値が変わる。(本来はZ軸だが、NEOダルマオトシの場合はY軸)
+    // 実際はZ軸なので、高さで値が変わる
+    accelData.add(LineChartBarData(
+        spots: accelZ,
+        color:Colors.yellow
+    ));
+*/
+    final List<FlSpot> gyroX = [];
+    for (var i = 0; i < _gyroX.length; i++) {
+      gyroX.add(FlSpot(i.toDouble(), _gyroX[i]));
+    }
+
+    final List<FlSpot> gyroY = [];
+    for (var i = 0; i < _gyroY.length; i++) {
+      gyroY.add(FlSpot(i.toDouble(), _gyroY[i]));
+    }
+
+    final List<FlSpot> gyroZ = [];
+    for (var i = 0; i < _rcGZ.length; i++) {
+      gyroZ.add(FlSpot(i.toDouble(), _rcGZ[i]));
+    }
+//    for (var i = 0; i < _gyroZ.length; i++) {
+//      gyroZ.add(FlSpot(i.toDouble(), _gyroZ[i]));
+//    }
+
+    // あまり動かない
+    accelData.add(LineChartBarData(
+        spots: gyroX,
+        color:Colors.blue,
+        dashArray: [2],
+    ));
+
+    // 結構動くので横方向の移動はこの値で確認できそう
+    accelData.add(LineChartBarData(
+        spots: gyroY,
+        color:Colors.red,
+        dashArray: [2],
+    ));
+
+    // おそらく基準は180～200くらい
+    // 縦方向の移動方向はこの値で判断できそう
+    accelData.add(LineChartBarData(
+        spots: gyroZ,
+        color:Colors.yellow,
+        //dashArray: [2],
+    ));
+
+    final List<FlSpot> rcAX = [];
+    final List<FlSpot> rcAY = [];
+    final List<FlSpot> rcAZ = [];
+    final List<FlSpot> rcGX = [];
+    final List<FlSpot> rcGY = [];
+    final List<FlSpot> rcGZ = [];
+
 
     return WillPopScope(
       onWillPop: () async => false,
@@ -197,13 +347,42 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: <Widget>[
-                      Image.asset(_isConnect == true ? "assets/image/daruma_on.png" : "assets/image/daruma_off.png"),
+                      _imageMap[_darumaImage]!,
                       Text(_stateText),
                       Text("Z : ${_curAz.toStringAsFixed(4)}"),
                       Text("Y : ${_curGy.toStringAsFixed(4)}"),
                     ],
                   ),
                 ),
+                Center(
+                  child:
+                  Container(
+                    alignment: Alignment.bottomCenter,
+                    child:
+                      accelData.isEmpty ? const Text("Wait") :
+                      LineChart(
+                          LineChartData(
+                            lineBarsData: accelData,
+                            titlesData: const FlTitlesData(
+                              topTitles: AxisTitles(
+                                axisNameWidget: Text(
+                                  "加速度センサー",
+                                ),
+                                axisNameSize: 35.0,
+                              ),
+                              rightTitles:
+                              AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                            ),
+/*
+                            maxY: 2,
+                            minY: -2,
+ */
+                            maxY: 100,
+                            minY: -100,
+                          )
+                      )
+                  )
+                )
               ]
             )
       ),
@@ -257,21 +436,28 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
     // Setup Listener for scan results
     // device not found? see "Common Problems" in the README
     _device = null;
-
+/*
     var subscription = FlutterBluePlus.scanResults.listen((results) {
+
+      if(results.isEmpty){
+        Logger.debug('result is empty');
+      }
+
       for (ScanResult r in results) {
-        // Logger.debug('${r.device.localName} found! rssi: ${r.rssi}');
-        if("" != r.device.localName){
-          Logger.debug('${r.device.localName} found!');
+        Logger.debug('${r.device.platformName } found! rssi: ${r.rssi}');
+        if("" != r.device.platformName ){
+          Logger.debug('${r.device.platformName } found!');
         }
 
-        if(_device == null && "daruma" == r.device.localName){
+        if(_device == null && "daruma" == r.device.platformName ){
           Logger.debug('daruma is scan');
           _device = r.device;
         }
       }
+    }).onError((e){
+      Logger.error("error", exception: e);
     });
-
+*/
     // Start scanning
     Logger.debug("BLE Scan Start");
     await FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
@@ -279,12 +465,27 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
     // Stop scanning
     await FlutterBluePlus.stopScan();
 
-
     if(null != _device){
       _connectBLE();
     }
 
     Logger.debug("BLE Scan End");
+  }
+
+  bool _isSePlaying = false;
+  void _sePlay(AssetSource asset){
+    if(_isSePlaying == true){
+      return;
+    }
+    _isSePlaying = true;
+    _sePlayer.play(asset)
+        .then((value){
+          _isSePlaying = false;
+        })
+        .catchError((e){
+          _isSePlaying = false;
+          Logger.error("SE再生でエラー", exception: e);
+        });
   }
 
   void _connectBLE() async{
@@ -294,6 +495,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
     if(null == _device){
       Logger.debug('device is null');
       _isConnect = false;
+      _darumaImage = DarumaImage.ready;
       return;
     }
 
@@ -305,20 +507,22 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
     });
     await _device?.connect();
     _isConnect = true;
+    _darumaImage = DarumaImage.normal;
     // 接続できた！
-    _sePlayer.play(_seAsset03);
-
+    //_sePlayer.play(_seAsset03);
+    _sePlay(_seAsset03);
+    _darumaState = DarumaState.stay;
 
     // Note: You must call this again if disconnected!
     List<BluetoothService>? services = await _device?.discoverServices();
     await _device?.requestMtu(255);
 
-    _device?.servicesList?.forEach((service) {
+    _device?.servicesList?.forEach((service)  {
       service.characteristics.forEach((characteristic) async{
         if(characteristic.properties.notify){
           _notifyChara = characteristic;
           Logger.debug("set onValueReceived");
-          characteristic.onValueReceived.listen((value) {
+          characteristic.onValueReceived.listen((value) async{
 
               // (accelX, accelY, accelZ),(gyroX, gyroY, gyroZ)
               var data = String.fromCharCodes(value);
@@ -349,15 +553,6 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
               _gyroY.insert(0, gY);
               _gyroZ.insert(0, gZ);
 
-              while(_accelX.length > 5){
-                _accelX.removeLast();
-                _accelY.removeLast();
-                _accelZ.removeLast();
-                _gyroX.removeLast();
-                _gyroY.removeLast();
-                _gyroZ.removeLast();
-              }
-
               // まるめ処理
               // 参考 https://ehbtj.com/electronics/sensor-digital-filter/
 
@@ -383,11 +578,6 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
                 // データなし
               }
 
-              Logger.debug(
-                  "_curAx ${_curAx.toStringAsFixed(4)} / _curAy ${_curAy.toStringAsFixed(4)} / _curAz ${_curAz.toStringAsFixed(4)} / "
-                  "_curGx ${_curGx.toStringAsFixed(4)} / _curGy ${_curGy.toStringAsFixed(4)} / _curGz ${_curGz.toStringAsFixed(4)}"
-              );
-
               _rcAX.insert(0, _curAx);
               _rcAY.insert(0, _curAy);
               _rcAZ.insert(0, _curAz);
@@ -396,29 +586,128 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
               _rcGY.insert(0, _curGy);
               _rcGZ.insert(0, _curGz);
 
+              while(_rcGZ.length > 50){
+                _accelX.removeLast();
+                _accelY.removeLast();
+                _accelZ.removeLast();
+                _gyroX.removeLast();
+                _gyroY.removeLast();
+                _gyroZ.removeLast();
+
+                _rcAX.removeLast();
+                _rcAY.removeLast();
+                _rcAZ.removeLast();
+                _rcGX.removeLast();
+                _rcGY.removeLast();
+                _rcGZ.removeLast();
+              }
+
               // 移動平均
 
+              //Logger.debug("判定中");
 
-              // 落下チェック
-              if(_curAz < -0.2){
-                // 落下中
+              var isDown = false;
+              var isMove = false;
+              //Logger.debug("_curAz $_curAz");
+              //if(_rcAY[0] - _rcAY[1] <= -0.1){
+              //if(_rcGX.length >= 2 && _rcGX[0] <= -40 && _rcGX[0] - _rcGX[1] <= -45){
+
+
+
+              if(_rcGZ.length >= 4 && (_gyroZ[0] - _gyroZ[1] >= 100 || _gyroZ[1] - _gyroZ[2] >= 100 || _gyroZ[2] - _gyroZ[3] >= 100)){
+                //落下
+                isDown = true;
+              }
+
+              const chkValue = 0.3;
+              if(_rcAX.length >= 4 && (
+                     ((_rcAX[0] - _rcAX[1]).abs() >= chkValue || (_rcAY[0] - _rcAY[1]).abs() >= chkValue || (_rcAZ[0] - _rcAZ[1]).abs() >= chkValue)
+                  && ((_rcAX[1] - _rcAX[2]).abs() >= chkValue || (_rcAY[1] - _rcAY[2]).abs() >= chkValue || (_rcAZ[1] - _rcAZ[2]).abs() >= chkValue)
+                  && ((_rcAX[2] - _rcAX[3]).abs() >= chkValue || (_rcAY[2] - _rcAY[3]).abs() >= chkValue || (_rcAZ[2] - _rcAZ[3]).abs() >= chkValue)
+                )
+              ){
+                //縦揺れ
+                isMove = true;
+              }
+
+              // NG判定
+              var ngCount = 0;
+              if(_accelX.length >= 10){
+                for (var i = 0; i < 10; i++) {
+                  if(
+                    (_rcGX[i] - _rcGX[i + 1]).abs() >= 100 &&
+                    (_rcGY[i] - _rcGY[i + 1]).abs() >= 100 &&
+                    (_rcGZ[i] - _rcGZ[i + 1]).abs() >= 100
+                  ){
+                    ngCount++;
+                  }
+                }
+              }
+              var isNg = ngCount > 2;
+              if(ngCount > 0){
+                Logger.debug("ngCount $ngCount");
+              }
+
+              if(isNg == true){
+                _darumaState = DarumaState.down;
+                _darumaImage = DarumaImage.hit;
+                _stateText = "NG";
+                Logger.debug("NG");
+
+
+              }else if(isDown == true){
+                _darumaState = DarumaState.down;
+                _darumaImage = DarumaImage.hit;
                 _stateText = "落下";
-                _sePlayer.play(_seAsset02);
-/*
-              }else if(_curGy.abs() >= 25.0){
-                // 左右に揺れている
-               _stateText = "おっとっと";
-                _sePlayer.play(_seAsset01);
-*/
+                Logger.debug("落下");
+
+              }else if(isMove == true){
+                _darumaState = DarumaState.move;
+                _stateText = "おっとっと";
+                Logger.debug("ゆれ");
+
               }else{
-                _stateText = "";
+                _darumaState = DarumaState.stay;
+
+              }
+
+
+              switch (_darumaState) {
+                case DarumaState.move:
+                  //_darumaImage = DarumaImage.hit;
+                  // 左右に揺れている
+                  //if (_sePlayer.state == PlayerState.stopped || _sePlayer.state == PlayerState.completed) {
+                  //  Logger.debug("SE play 2");
+                  //  var seIndex = _random.nextInt(_darumaPlaySe.length);
+                  //  try{
+                  //    _sePlayer.play(_darumaPlaySe[seIndex]);
+                  //  }catch(e){
+                  //    Logger.error("SE再生でエラー", exception: e);
+                  //  }
+                  //}
+                  break;
+
+                case DarumaState.down:
+                  _darumaImage = DarumaImage.hit;
+                  Logger.debug(_sePlayer.state.toString());
+                  //if (_sePlayer.state == PlayerState.stopped ||　_sePlayer.state == PlayerState.completed) {
+                    Logger.debug("SE play 1");
+                    try{
+                      _sePlay(_darumaPlaySe[1]);
+                    }catch(e){
+                      Logger.error("SE再生でエラー", exception: e);
+                    }
+                  //}
+                  break;
+                default:
+                  _darumaImage = DarumaImage.normal;
+                  _stateText = "";
+                  break;
               }
 
               setState(() {
 
               });
-
-//              Logger.debug("onValueReceived $data");
 
             },
           );
@@ -446,6 +735,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver{
   void _disconnectBLE() async {
     Logger.debug('disconnect BLE');
     _isConnect = false;
+    _darumaImage = DarumaImage.ready;
     if(null == _device){
       Logger.debug('device is null');
       return;
@@ -464,10 +754,10 @@ class BackgroundPainter extends CustomPainter {
   static int areaHeight = 0;
   static int counter = 0;
 
-  static final _lisner = ValueNotifier<int>(0);
+  static final _listener = ValueNotifier<int>(0);
 
 //  BackgroundPainter({Listenable? repaint}) : super(repaint: repaint);
-  BackgroundPainter() : super(repaint: _lisner);
+  BackgroundPainter() : super(repaint: _listener);
 
   static void initialize() async{
     final physicalSize = ui.PlatformDispatcher.instance.views.first.physicalSize;
@@ -503,9 +793,9 @@ class BackgroundPainter extends CustomPainter {
     }
 
 
-    _lisner.value++;
-    if(backgroundImage!.width < _lisner.value){
-      _lisner.value = 0;
+    _listener.value++;
+    if(backgroundImage!.width < _listener.value){
+      _listener.value = 0;
     }
   }
 
@@ -522,8 +812,8 @@ class BackgroundPainter extends CustomPainter {
     var yCnt = areaHeight / backgroundImage!.height;
     for(int y = -1; y < yCnt + 2; y++){
       for(int x = -1; x < xCnt + 2; x++){
-        var imgX = x * backgroundImage!.width + _lisner.value;
-        var imgY = y * backgroundImage!.height - _lisner.value;
+        var imgX = x * backgroundImage!.width + _listener.value;
+        var imgY = y * backgroundImage!.height - _listener.value;
         canvas.drawImage(backgroundImage!, Offset(imgX.toDouble(), imgY.toDouble()), paint);
       }
     }

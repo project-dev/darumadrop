@@ -38,6 +38,7 @@ dependencies:
   flutter_blue_plus: ^1.14.11
   package_info_plus: ^4.1.0
   audioplayers: ^5.1.0
+  fl_chart: ^0.68.0
 
 dev_dependencies:
   flutter_test:
