@@ -39,6 +39,8 @@ dependencies:
   package_info_plus: ^4.1.0
   audioplayers: ^5.1.0
   fl_chart: ^0.68.0
+  riverpod: ^2.5.1
+  flutter_riverpod: ^2.5.1
 
 dev_dependencies:
   flutter_test:
